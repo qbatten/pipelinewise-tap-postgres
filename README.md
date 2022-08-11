@@ -99,7 +99,7 @@ Each entry under the Catalog's "stream" key will need the following metadata:
 }
 ```
 
-The replication method can be one of `FULL_TABLE`, `INCREMENTAL` or `LOG_BASED`.
+The replication method can be one of `FULL_TABLE`, `INCREMENTAL`, `TIME_BASED` or `LOG_BASED`.
 
 **Note**: Log based replication requires a few adjustments in the source postgres database, please read further
 for more information.
@@ -163,6 +163,31 @@ to the tap for the next sync.
 
   **Note**: Replication slots are specific to a given database in a cluster. If you want to connect multiple
   databases - whether in one integration or several - you’ll need to create a replication slot for each database.
+
+### Time Based Replication
+
+Configuration:
+
+* replication-method: TIME_BASED
+* replication-key: Time field used to select records to replicate.  Tested against TIMESTAMP fields, probably works for other time fields
+* replication-time-interval: Time interval  to load per database query.  
+
+These two fields get used together in a WHERE clause like:
+
+```sql
+WHERE {replication_key} >= {interval_start} 
+      AND {replication_key} < {interval_start} + INTERVAL {replication_time_interval}
+```
+
+Example:
+
+```yaml
+    metadata:
+      public-tablename:
+        replication-method: TIME_BASED
+        replication-key: time
+        replication-time-interval: 10 MINUTES
+```
 
 ### To run tests:
 
