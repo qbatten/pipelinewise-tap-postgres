@@ -16,6 +16,7 @@ import tap_postgres.sync_strategies.common as sync_common
 from tap_postgres.sync_strategies import logical_replication
 from tap_postgres.sync_strategies import full_table
 from tap_postgres.sync_strategies import incremental
+from tap_postgres.sync_strategies import time_based
 from tap_postgres.discovery_utils import discover_db
 from tap_postgres.stream_utils import (
     dump_catalog, clear_state_on_replication_change,
@@ -87,6 +88,30 @@ def do_sync_incremental(conn_config, stream, state, desired_columns, md_map):
 
     return state
 
+# Possible state keys: replication_key, replication_key_value, replication_time_interval
+def do_sync_time_based(conn_config, stream, state, desired_columns, md_map):
+    """
+    Runs Time-Based sync
+    """
+    replication_key = md_map.get((), {}).get('replication-key')
+    replication_time_interval = md_map.get((), {}).get('replication-time-interval')
+    LOGGER.info("Stream %s is using time-based replication with replication key %s and interval %s",
+                stream['tap_stream_id'],
+                replication_key,
+                replication_time_interval)
+
+    stream_state = state.get('bookmarks', {}).get(stream['tap_stream_id'])
+    illegal_bk_keys = set(stream_state.keys()).difference(
+        {'replication_key', 'replication_key_value', 'version', 'last_replication_method'})
+    if len(illegal_bk_keys) != 0:
+        raise Exception("invalid keys found in state: {}".format(illegal_bk_keys))
+
+    state = singer.write_bookmark(state, stream['tap_stream_id'], 'replication_key', replication_key)
+
+    sync_common.send_schema_message(stream, [replication_key])
+    state = time_based.sync_table(conn_config, stream, state, desired_columns, md_map)
+
+    return state
 
 def sync_method_for_streams(streams, state, default_replication_method):
     """
@@ -103,8 +128,8 @@ def sync_method_for_streams(streams, state, default_replication_method):
 
         state = clear_state_on_replication_change(state, stream['tap_stream_id'], replication_key, replication_method)
 
-        if replication_method not in {'LOG_BASED', 'FULL_TABLE', 'INCREMENTAL'}:
-            raise Exception(f"Unrecognized replication_method {replication_method}")
+        if replication_method not in {'LOG_BASED', 'FULL_TABLE', 'INCREMENTAL', 'TIME_BASED'}:
+            raise Exception("Unrecognized replication_method {}".format(replication_method))
 
         md_map = metadata.to_map(stream['metadata'])
         desired_columns = [c for c in stream['schema']['properties'].keys() if
@@ -125,7 +150,9 @@ def sync_method_for_streams(streams, state, default_replication_method):
         elif replication_method == 'INCREMENTAL':
             lookup[stream['tap_stream_id']] = 'incremental'
             traditional_steams.append(stream)
-
+        elif replication_method == 'TIME_BASED':
+            lookup[stream['tap_stream_id']] = 'time_based'
+            traditional_steams.append(stream)
         elif get_bookmark(state, stream['tap_stream_id'], 'xmin') and \
                 get_bookmark(state, stream['tap_stream_id'], 'lsn'):
             # finishing previously interrupted full-table (first stage of logical replication)
@@ -173,6 +200,9 @@ def sync_traditional_stream(conn_config, stream, state, sync_method, end_lsn):
     elif sync_method == 'incremental':
         state = singer.set_currently_syncing(state, stream['tap_stream_id'])
         state = do_sync_incremental(conn_config, stream, state, desired_columns, md_map)
+    elif sync_method == 'time_based':
+        state = singer.set_currently_syncing(state, stream['tap_stream_id'])
+        state = do_sync_time_based(conn_config, stream, state, desired_columns, md_map)
     elif sync_method == 'logical_initial':
         state = singer.set_currently_syncing(state, stream['tap_stream_id'])
         LOGGER.info("Performing initial full table sync")
